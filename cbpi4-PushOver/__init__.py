@@ -229,12 +229,15 @@ TIMER_RAN_OUT = re.compile(r"The \d+(?::\d\d){1,2} timer has run out\.")
 #: The titles of the boil's addition reminders: BoilStep's hop alerts and first-wort hops, and the runoff's
 #: first-wort hops (StepController._first_wort_at_runoff).
 ADDITIONS = ("Hop Alert", "First Wort Hop Addition!")
-#: How those reminders are worded, and what the alert says instead: what to do, and when.
+#: How those reminders are worded, and what the alert says instead: what to do, and when. The first whose title (None:
+#: either) and words match is used.
 ADDITION_WORDS = (
-    (re.compile(r"Please add (?P<what>.+) \(\d+\)"), "add {what} now"),  # a hop alert: "Please add 1.50 oz Citra (1)"
-    (re.compile(r"Please add Hop (?P<n>\d+)"), "add hop {n} now"),  # a hop alert with no text
-    (re.compile(r"Please add (?P<what>.+) for first wort"), "add {what} for first wort now"),  # at the boil's start
-    (re.compile(r"Please add (?P<what>.+)"), "add {what}"),  # the runoff's: "... before the first runnings reach it"
+    # a hop alert with no text, from an older core; a newer one says "Please add the next hop addition"
+    ("Hop Alert", re.compile(r"Please add Hop (?P<n>\d+)"), "add hop {n} now"),
+    # a hop alert: "Please add 1.50 oz Citra"; an older core put the addition's place in the boil's list after it, "(1)"
+    ("Hop Alert", re.compile(r"Please add (?P<what>.+?)(?: \(\d+\))?"), "add {what} now"),
+    (None, re.compile(r"Please add (?P<what>.+) for first wort"), "add {what} for first wort now"),  # at the boil's start
+    (None, re.compile(r"Please add (?P<what>.+)"), "add {what}"),  # the runoff's: "... before the first runnings reach it"
 )
 #: Titles that say nothing but the level: NOTIFY_ON_ERROR's, from the log, and "Error".
 GENERIC = ("error", "warning", "critical")
@@ -539,17 +542,17 @@ class PushOver(CBPiExtension):
         """What the alert says: short, plain, what to do."""
         title, message = _plain(title), _plain(message)
         if kind == "additions":
-            return self._addition(message)
+            return self._addition(title, message)
         if kind == "questions":
             return "CraftBeerPi asks: " + _join(title, message)
         if title.lower() in GENERIC:
             title = ""
         return ("Error: " if kind == "errors" else "Warning: ") + _join(title, message)
 
-    def _addition(self, message):
+    def _addition(self, title, message):
         """"Boil: add 1.50 oz Citra now": the step the brew is on, then the addition."""
-        for pattern, words in ADDITION_WORDS:
-            found = pattern.fullmatch(message)
+        for said_by, pattern, words in ADDITION_WORDS:
+            found = pattern.fullmatch(message) if said_by in (None, title) else None
             if found:
                 what = words.format(**found.groupdict())
                 break
