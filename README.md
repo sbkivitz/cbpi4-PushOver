@@ -79,8 +79,12 @@ ntfy lists for an unreleased 1.8.0. On Android, priorities 4 and 5 vibrate longe
 - Reloading a page, or a page reconnecting, sends nothing: the page is shown what still waits, with no new alert.
 - After a restart, a timer brought back run out isn't sent again. ntfy's resends for it carry on, and on Pushover its
   alert still stops when the timer is answered. Which timers' alerts are under way is kept in `pushover.json` in the
-  config folder for that.
-- The same error or warning again within 10 minutes isn't sent again, as the screen shows the same words once.
+  config folder for that. On Pushover each timer's alert goes with a tag of its own, kept there before it's sent, so it
+  can be stopped even if CraftBeerPi stopped before Pushover's answer came back.
+- The same error or warning again within 10 minutes isn't sent again: a fault repeating the same words each control
+  pass sends one alert. With `NOTIFY_ON_ERROR` on, a warning or error from CraftBeerPi's log that clears and comes back
+  is the exception: CraftBeerPi announces it again on the screen once the line has stopped for 5 minutes, and the phone
+  is sent it again too, however soon after the first.
 - A question CraftBeerPi asks again after a restart (Resume brew?, add the malt, ...) is a new question, and a new
   alert.
 
@@ -182,6 +186,7 @@ Pushover API, fake ones say: `CBPI_NTFY_SERVER=http://127.0.0.1:8048`, `CBPI_PUS
 
 ### Changelog:
 
+- (0.0.10.post3) A warning or error from CraftBeerPi's log that clears and comes back is sent to the phone again whenever CraftBeerPi announces it again (core 4.7.7.post71 or later tells it so), not held back for 10 minutes. A Pushover timer alert can be stopped after a power cut that came before Pushover's answer: each goes with its own tag, kept in pushover.json before it's sent.
 - 18.11.26: (0.0.10.post2) ntfy, free and with no account, as the default service, Pushover the alternative. A run-out timer on ntfy is sent at priority 5 and again every 2 minutes, 10 more times at most, until answered; the rest at priority 4, each with its emoji. A random topic suggested at /phone-alerts/topic; the test alert at /phone-alerts/test as well, of an alert or a timer's alert, with an answer a page can read. A Pushover emergency alert repeats for up to 50 minutes, Pushover's limit, and one Pushover has no phone for counts as not sent. The switches renamed phone_alerts_*, their values kept.
 - 18.11.26: (0.0.10.post1) Phone alerts for what the brew-day screen beeps for: run-out timers as emergency alerts, cancelled when answered on any screen; additions, questions, errors and warnings as high-priority alerts. A switch for each kind, a test alert, sent with a 10 second timeout without holding CraftBeerPi up, the keys kept out of the log.
 - 10.10.25: (0.0.10) Error handling during message sending via request

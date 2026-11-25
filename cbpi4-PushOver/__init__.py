@@ -46,9 +46,16 @@ reloads or reconnects is shown the prompts still waiting as they were, with no
 new notification. After a restart, a timer brought back run out raises its
 prompt again; its alert was sent before, so it isn't sent again, and ntfy's
 resends and Pushover's cancel carry on. Which timers' alerts are still under
-way is kept in FILE, in the config folder, for that. The same error or warning
-again within REPEAT_WINDOW brewing seconds isn't sent again either: the screen
-shows the same words once.
+way is kept in FILE, in the config folder, for that. Each Pushover alert of a
+timer goes with a tag of its own, kept there before it is sent, so it can be
+cancelled even when CraftBeerPi stopped before Pushover's answer, with the
+receipt, came back.
+
+The same error or warning again within REPEAT_WINDOW brewing seconds isn't
+sent again either - a fault repeating its words each control pass - unless
+CraftBeerPi says it is one that cleared and came back: with NOTIFY_ON_ERROR,
+a log line notified again because it had stopped being logged for 5 minutes
+(log_line "new"). What the screen announces again, the phone sends again.
 
 Off until the chosen service is set up - ntfy's topic, or Pushover's user key
 and application token: nothing is sent then, and nothing is logged as an
@@ -148,6 +155,10 @@ STATUS = {"bad_request": 400, "not_set_up": 409, "limit": 429, "refused": 502, "
 REPEAT_WINDOW = 600
 #: The most of those remembered at once.
 REMEMBERED = 500
+#: What CraftBeerPi tells a listener of a notification it makes from a log line that is logged for the first time, or
+#: again after it had stopped - its fault cleared and came back (NotificationController.LOG_LINE_NEW). Its reminder
+#: while the line never stops is "still", and any other notification's None.
+LOG_LINE_NEW = "new"
 
 #: The longest title and message sent: Pushover's limits, and well within ntfy's.
 TITLE_MAX, MESSAGE_MAX = 250, 1024
@@ -230,6 +241,8 @@ GENERIC = ("error", "warning", "critical")
 
 #: A receipt as Pushover gives one, before it goes into an address.
 RECEIPT = re.compile(r"[A-Za-z0-9]{1,64}")
+#: A timer's alert's tag on Pushover, before it goes into an address: cbpi- and SUGGEST random letters and digits.
+TAG = re.compile(r"cbpi-[a-z0-9]{1,59}")
 #: A web address an ntfy alert can open.
 LINK = re.compile(r"https?://\S+")
 #: The shortest secret the log filter looks for: shorter, hiding it would mangle the log's lines, and a topic that
@@ -247,6 +260,12 @@ def _version():
 
 def suggest_topic():
     """A new topic for ntfy: cbpi- and SUGGEST random letters and digits."""
+    return "cbpi-" + "".join(_random_choice(SUGGEST_FROM) for _ in range(SUGGEST))
+
+
+def _alarm_tag():
+    """A tag for one timer's alert on Pushover, cbpi- and SUGGEST random letters and digits: its own, so cancelling by
+    it stops that alert and no other."""
     return "cbpi-" + "".join(_random_choice(SUGGEST_FROM) for _ in range(SUGGEST))
 
 
@@ -280,18 +299,20 @@ def _failure(reason, detail, field=None):
 
 class Alarm:
     """A run-out timer's alert while it is under way: the timer's id and name, the prompt that rang it, the service it
-    went to; on Pushover its receipt (None until Pushover answers, or if it didn't); on ntfy how many have been sent
-    and when the next is due (clock.monotonic(), None when no more are)."""
+    went to; on Pushover its receipt (None until Pushover answers, or if it didn't) and its tag (None once Pushover is
+    known not to have taken it), and whether it is on its way there; on ntfy how many have been sent and when the next
+    is due (clock.monotonic(), None when no more are)."""
 
-    __slots__ = ("timer", "name", "prompt", "service", "receipt", "sent", "due")
+    __slots__ = ("timer", "name", "prompt", "service", "receipt", "sent", "due", "tag", "sending")
 
-    def __init__(self, timer, name, prompt, service, receipt=None, sent=1, due=None):
+    def __init__(self, timer, name, prompt, service, receipt=None, sent=1, due=None, tag=None):
         self.timer, self.name, self.prompt, self.service = timer, name, prompt, service
-        self.receipt, self.sent, self.due = receipt, sent, due
+        self.receipt, self.sent, self.due, self.tag = receipt, sent, due, tag
+        self.sending = False
 
     def to_dict(self):
         return dict(timer=self.timer, name=self.name, prompt=self.prompt, service=self.service, receipt=self.receipt,
-                    sent=self.sent)
+                    sent=self.sent, tag=self.tag)
 
 
 class _HideKeys(logging.Filter):
@@ -484,9 +505,11 @@ class PushOver(CBPiExtension):
 
     # -- what the screen beeps for --------------------------------------------------------------------------------
 
-    async def _heard(self, cbpi, title, message, type, action):
+    async def _heard(self, cbpi, title, message, type, action, log_line=None):
         """A notification (NotificationController's listener, in a task of its own): its alert, if the screen beeps
-        for it, its kind's switch is on and the chosen service is set up. Never raises."""
+        for it, its kind's switch is on and the chosen service is set up. log_line, from a core that tells it, says
+        why one made from a log line is sent: LOG_LINE_NEW, the line new or back after clearing, is never held back
+        as a repeat. Never raises."""
         try:
             kind = self._kind(title, message, type, action)
             if kind is None or not self._on(kind) or self._off():
@@ -494,7 +517,8 @@ class PushOver(CBPiExtension):
             if kind == "timers":
                 await self._ran_out(_plain(title))
                 return
-            if kind in ("errors", "warnings") and self._repeated(kind, _plain(title), _plain(message)):
+            if kind in ("errors", "warnings") and self._repeated(kind, _plain(title), _plain(message),
+                                                                 again=log_line != LOG_LINE_NEW):
                 return
             await self._send(kind, self._words(kind, title, message))
         except Exception as e:  # noqa: BLE001 - an alert that can't be sent never stops the brew
@@ -542,11 +566,15 @@ class PushOver(CBPiExtension):
             return ""
         return _plain(getattr(step, "name", "")) if step is not None else ""
 
-    def _repeated(self, *words):
-        """Whether these words were sent less than REPEAT_WINDOW brewing seconds ago; noted as sent now if not."""
+    def _repeated(self, *words, again=True):
+        """Whether these words were sent less than REPEAT_WINDOW brewing seconds ago; noted as sent now if not. Not
+        `again` - a log line CraftBeerPi says is new, or cleared and came back - they are sent however lately they
+        were."""
         now = clock.monotonic()
         while self._sent and now - next(iter(self._sent.values())) >= REPEAT_WINDOW:
             self._sent.popitem(last=False)
+        if not again:
+            self._sent.pop(words, None)
         if words in self._sent:
             return True
         self._sent[words] = now
@@ -577,12 +605,22 @@ class PushOver(CBPiExtension):
             await self._end(alarm)
         service = self._service()
         alarm = Alarm(t.id, t.name, t.prompt, service,
-                      due=clock.monotonic() + RESEND_EVERY if service == NTFY else None)
+                      due=clock.monotonic() + RESEND_EVERY if service == NTFY else None,
+                      tag=_alarm_tag() if service == PUSHOVER else None)
         self._alarms[t.id] = alarm
         self._save()
         self._watch()
-        _, receipt, _ = await self._send("timers", f"Timer {t.name.upper()}: time's up")
+        alarm.sending = True
+        try:
+            _, receipt, _ = await self._send("timers", f"Timer {t.name.upper()}: time's up", tag=alarm.tag)
+        finally:
+            alarm.sending = False
         if receipt is None:
+            if alarm.tag is not None:
+                # Pushover didn't take it: there is nothing to cancel by its tag.
+                alarm.tag = None
+                if self._alarms.get(t.id) is alarm:
+                    self._save()
             return
         if self._alarms.get(t.id) is alarm:
             alarm.receipt = receipt
@@ -667,19 +705,24 @@ class PushOver(CBPiExtension):
         self._save()
         if alarm.service == PUSHOVER and alarm.receipt is not None:
             await self._cancel(alarm.receipt, f"the alarm for {alarm.name}", "it was answered")
+        elif alarm.service == PUSHOVER and alarm.tag is not None and not alarm.sending:
+            # CraftBeerPi stopped while the alert was on its way, before Pushover's answer, with the receipt, came
+            # back: stopped by the tag it was sent with. (One still on its way is cancelled once the answer is in.)
+            await self._cancel(None, f"the alarm for {alarm.name}", "it was answered", tag=alarm.tag)
         elif alarm.service == NTFY and alarm.sent <= RESENDS:
             logger.info("Phone alerts: no more alerts for %s: it was answered.", alarm.name)
 
-    async def _cancel(self, receipt, what, why):
-        """Pushover stops repeating an emergency alert, through its receipt. `what` it was and `why` it stops are for
-        the log."""
+    async def _cancel(self, receipt, what, why, tag=None):
+        """Pushover stops repeating an emergency alert, through its receipt, or through its `tag` when the receipt
+        never came. `what` it was and `why` it stops are for the log."""
         token = self._setting(S_TOKEN)
         if not token:
             logger.info("Phone alerts: %s goes on on the phone until it's acknowledged there: %s is blank, so it can't "
                         "be stopped from here.", what, S_TOKEN)
             return
-        status, answer = await self._post(PUSHOVER, f"{self.api}/receipts/{receipt}/cancel.json",
-                                          data=dict(token=token))
+        url = (f"{self.api}/receipts/cancel_by_tag/{tag}.json" if tag is not None
+               else f"{self.api}/receipts/{receipt}/cancel.json")
+        status, answer = await self._post(PUSHOVER, url, data=dict(token=token))
         failure = answer if status is None else self._pushover_failure(status, answer)
         if failure is not None:
             logger.warning("Phone alerts: %s wasn't stopped on the phone: %s. Acknowledge it there.", what,
@@ -705,16 +748,18 @@ class PushOver(CBPiExtension):
         for item in (data.get("alarms") if isinstance(data, dict) else None) or []:
             if not isinstance(item, dict):
                 continue
-            timer, receipt, sent = item.get("timer"), item.get("receipt"), item.get("sent", 1)
+            timer, receipt, sent, tag = item.get("timer"), item.get("receipt"), item.get("sent", 1), item.get("tag")
             if isinstance(timer, bool) or not isinstance(timer, int):
                 continue
             if not (isinstance(receipt, str) and RECEIPT.fullmatch(receipt)):
                 receipt = None
+            if not (isinstance(tag, str) and TAG.fullmatch(tag)):
+                tag = None
             if isinstance(sent, bool) or not isinstance(sent, int) or sent < 1:
                 sent = 1
             service = NTFY if item.get("service") == NTFY else PUSHOVER
             self._alarms[timer] = Alarm(timer, _plain(item.get("name")) or f"timer {timer}", item.get("prompt"),
-                                        service, receipt, sent)
+                                        service, receipt, sent, tag=tag)
 
     def _save(self):
         if self._path is None:
@@ -788,12 +833,12 @@ class PushOver(CBPiExtension):
         field = {401: "token" if token else "topic", 403: "topic"}.get(status)
         return _failure("refused", detail, field)
 
-    async def _send(self, kind, text):
-        """One alert of `kind`, saying `text` under the brewery's name, on the chosen service. -> (sent, Pushover's
-        receipt or None, why not as _failure gives it or None)."""
+    async def _send(self, kind, text, tag=None):
+        """One alert of `kind`, saying `text` under the brewery's name, on the chosen service; on Pushover with `tag`,
+        if given. -> (sent, Pushover's receipt or None, why not as _failure gives it or None)."""
         service = self._service()
         if service == PUSHOVER:
-            receipt, why = await self._send_pushover(kind, text)
+            receipt, why = await self._send_pushover(kind, text, tag)
         else:
             receipt, why = await self._send_ntfy(kind, text)
         if why is not None:
@@ -822,7 +867,7 @@ class PushOver(CBPiExtension):
                                           headers={"Authorization": f"Bearer {token}"} if token else None)
         return None, answer if status is None else self._ntfy_failure(status, answer, token)
 
-    async def _send_pushover(self, kind, text):
+    async def _send_pushover(self, kind, text, tag=None):
         """-> (its receipt or None, None) once Pushover has it, or (None, why not)."""
         keys = self._pushover()
         if keys is None:
@@ -833,6 +878,8 @@ class PushOver(CBPiExtension):
                     priority=EMERGENCY if urgent else HIGH)
         if urgent:
             data.update(retry=RETRY, expire=EXPIRE if kind == "timers" else TEST_EXPIRE)
+        if urgent and tag is not None:
+            data.update(tags=tag)
         status, answer = await self._post(PUSHOVER, f"{self.api}/messages.json", data=data)
         why = answer if status is None else self._pushover_failure(status, answer)
         if why is not None:

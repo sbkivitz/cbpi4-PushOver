@@ -7,7 +7,7 @@ with open(path.join(this_directory, 'README.md'), encoding='utf-8') as f:
     long_description = f.read()
 
 setup(name='cbpi4-PushOver',
-      version='0.0.10.post2',
+      version='0.0.10.post3',
       description='CraftBeerPi4 Plugin to send phone alerts through ntfy or Pushover for what the brew-day screen beeps for',
       author='Alexander Vollkopf',
       author_email='avollkopf@web.de',
