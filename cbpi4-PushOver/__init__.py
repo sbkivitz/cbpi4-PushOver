@@ -23,7 +23,7 @@ It goes through the service chosen in phone_alerts_service:
 - Pushover, the alternative: an account, and an app bought after a trial. A
   run-out timer's alert is an emergency alert, which Pushover repeats until it
   is acknowledged on the phone, 50 times at most, and which is cancelled once
-  the timer is answered on a screen - OK, +5 MIN, set anew or removed -
+  the timer is answered on a screen - OK, set anew or removed -
   through Pushover's receipts API. Its app's Critical Alerts can sound on
   silent.
 
